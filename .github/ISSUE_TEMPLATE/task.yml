@@ -1,0 +1,28 @@
+name: Task
+description: Lo que el equipo técnico hace.
+type: Task
+projects: ["BluefoxSV/19"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Definicion de Ready:**
+        - La tarea debe tener una descripción clara de qué hacer.
+
+        **Después de crear el issue (sidebar):**
+        - **Priority** y **Points** — por defecto P1 y 1
+        - **Dependencies** → Poner *Blocked by* / *Blocking* si esta tarea depende de otra.
+        - El issue se agrega al Project **ERP** (template + Action de respaldo).
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Descripción
+      description: Qué hay que hacer, en lenguaje sencillo (obligatorio).
+      placeholder: |
+        hacer un endpoint para listar contingencias y enviar las seleccionadas a hacienda
+
+        detalle (si aplica): design | frontend | backend | …
+        out of scope (si aplica): …
+    validations:
+      required: true

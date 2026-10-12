@@ -1,0 +1,43 @@
+name: User Story
+description: Lo que el usuario necesita con su QA (quien, porque, que).
+type: Story
+projects: ["BluefoxSV/19"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Definicion de Ready:**
+        - La story debe tener una descripción clara de lo que el usuario necesita.
+        - La story debe tener un QA claro (qué se evalúa).
+
+        **Después de crear el issue (sidebar):**
+        - Crear Tasks hijas con **Create sub-issue** (type Task)
+        - **Priority** y **Points** — por defecto P1 y 1
+        - **Dependencies** → *Blocked by* si esta Story depende de otra
+        - El issue se agrega al Project **ERP** por defecto.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Descripción
+      description: Quién necesita algo / por qué / qué hay que darles (obligatorio).
+      placeholder: |
+        los usuarios necesitan …
+        porque …
+        asi que hay que …
+
+        out of scope (si aplica):
+        - …
+    validations:
+      required: true
+
+  - type: textarea
+    id: qa
+    attributes:
+      label: QA
+      description: Qué se va a evaluar antes de dar la story por terminada (obligatorio).
+      placeholder: |
+        - se puede … y el resultado se ve en pantalla
+        - el dato queda guardado y se puede consultar
+    validations:
+      required: true

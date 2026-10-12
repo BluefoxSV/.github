@@ -1,0 +1,164 @@
+name: Close parent Story when tasks are done
+
+# When a Task (sub-issue) is closed, if its parent Story has no open
+# sub-issues left, close the Story and set Project ERP Status=Done.
+#
+# Uses the org GitHub App (vars.BOT_CLIENT_ID + secrets.BOT_PRIVATE_KEY) so GraphQL
+# can see cross-repo sub-issues (FoxPosReact + BluefoxAPI). GITHUB_TOKEN
+# and PROJECTS_TOKEN cannot.
+# Project workflow "Item closed" also maps closed → Done; we set Done
+# explicitly because built-in workflows can skip API-driven updates.
+on:
+  workflow_call:
+    inputs:
+      runner_json:
+        description: JSON string or array accepted by runs-on.
+        required: true
+        type: string
+    secrets:
+      BOT_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  close-parent:
+    name: Close parent Story
+    runs-on: ${{ fromJSON(inputs.runner_json) }}
+    steps:
+      - name: GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.BOT_CLIENT_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Ensure gh CLI
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            echo "gh already installed: $(gh --version | head -1)"
+            exit 0
+          fi
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh
+
+      - name: Close Story if all sub-issues are closed
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          ISSUE: ${{ github.event.issue.number }}
+          ISSUE_TYPE: ${{ github.event.issue.type.name }}
+          PROJECT_OWNER: BluefoxSV
+          PROJECT_NUMBER: "19"
+          STATUS_FIELD_ID: PVTSSF_lADOBhwPpc4BfysfzhaDCsE
+          STATUS_DONE_OPTION_ID: "98236657"
+        run: |
+          set -euo pipefail
+
+          if [[ "${ISSUE_TYPE:-}" == "Story" ]]; then
+            echo "Closed issue is a Story; nothing to cascade."
+            exit 0
+          fi
+
+          meta="$(gh api graphql -f query="
+            query {
+              repository(owner: \"${OWNER}\", name: \"${REPO}\") {
+                issue(number: ${ISSUE}) {
+                  number
+                  parent {
+                    number
+                    title
+                    state
+                    url
+                    issueType { name }
+                    repository {
+                      name
+                      owner { login }
+                      nameWithOwner
+                    }
+                    subIssues(first: 100) {
+                      nodes { number state title }
+                    }
+                    projectItems(first: 20) {
+                      nodes {
+                        id
+                        project { id number }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ")"
+
+          parent_number="$(echo "$meta" | jq -r '.data.repository.issue.parent.number // empty')"
+          if [[ -z "$parent_number" ]]; then
+            echo "No parent issue; skip."
+            exit 0
+          fi
+
+          parent_type="$(echo "$meta" | jq -r '.data.repository.issue.parent.issueType.name // empty')"
+          if [[ "$parent_type" != "Story" ]]; then
+            echo "Parent #${parent_number} is type=${parent_type:-none}; skip."
+            exit 0
+          fi
+
+          parent_state="$(echo "$meta" | jq -r '.data.repository.issue.parent.state')"
+          parent_repo="$(echo "$meta" | jq -r '.data.repository.issue.parent.repository.nameWithOwner')"
+          parent_title="$(echo "$meta" | jq -r '.data.repository.issue.parent.title')"
+
+          if [[ "$parent_state" != "OPEN" ]]; then
+            echo "Parent ${parent_repo}#${parent_number} is ${parent_state}; skip."
+            exit 0
+          fi
+
+          open_count="$(echo "$meta" | jq -r '[.data.repository.issue.parent.subIssues.nodes[] | select(.state == "OPEN")] | length')"
+          total_count="$(echo "$meta" | jq -r '.data.repository.issue.parent.subIssues.nodes | length')"
+
+          if [[ "$total_count" -eq 0 ]]; then
+            echo "Parent has no sub-issues listed; skip."
+            exit 0
+          fi
+
+          if [[ "$open_count" -ne 0 ]]; then
+            echo "Parent ${parent_repo}#${parent_number} still has ${open_count}/${total_count} open sub-issues."
+            exit 0
+          fi
+
+          closed_list="$(echo "$meta" | jq -r '[.data.repository.issue.parent.subIssues.nodes[].number | "#" + tostring] | join(", ")')"
+          echo "All ${total_count} sub-issues of ${parent_repo}#${parent_number} are closed. Closing Story."
+
+          gh issue close "$parent_number" --repo "$parent_repo" --reason completed \
+            --comment "Cerrada automáticamente: todas las Tasks hijas están cerradas (${closed_list})."
+
+          item_id="$(echo "$meta" | jq -r --argjson n "$PROJECT_NUMBER" '
+            .data.repository.issue.parent.projectItems.nodes[]
+            | select(.project.number == $n)
+            | .id' | head -1)"
+          project_id="$(echo "$meta" | jq -r --argjson n "$PROJECT_NUMBER" '
+            .data.repository.issue.parent.projectItems.nodes[]
+            | select(.project.number == $n)
+            | .project.id' | head -1)"
+
+          if [[ -z "$item_id" || "$item_id" == "null" ]]; then
+            echo "Story is not on Project ERP; issue closed, Status not set."
+            exit 0
+          fi
+
+          gh project item-edit \
+            --id "$item_id" \
+            --project-id "$project_id" \
+            --field-id "$STATUS_FIELD_ID" \
+            --single-select-option-id "$STATUS_DONE_OPTION_ID"
+
+          echo "Set Status=Done on ${parent_repo}#${parent_number} (${parent_title})."

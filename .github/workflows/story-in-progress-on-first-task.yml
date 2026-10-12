@@ -1,0 +1,202 @@
+name: Sync ERP Story children
+
+# Keep child Tasks aligned with their parent Story on Project ERP:
+# - Story Status=Ready -> Tasks in Backlog become Ready (not In progress/Done)
+# - Story Sprint set -> Tasks get the same Sprint
+# - First Task In progress (or assigned) -> Story Backlog/Ready becomes In progress
+#
+# Board Sprint/Ready changes are handled by the caller workflow dispatch.
+# Assigning a Task still moves the parent Story to In progress immediately.
+# Uses the org GitHub App (vars.BOT_CLIENT_ID + secrets.BOT_PRIVATE_KEY) for both repos
+# and Project ERP. GITHUB_TOKEN and PROJECTS_TOKEN are limited.
+on:
+  workflow_call:
+    inputs:
+      runner_json:
+        description: JSON string or array accepted by runs-on.
+        required: true
+        type: string
+      sync_board:
+        description: Run the ERP board sync instead of the assigned Task handler.
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      BOT_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  from-assignment:
+    name: From assigned Task
+    if: ${{ !inputs.sync_board }}
+    runs-on: ${{ fromJSON(inputs.runner_json) }}
+    steps:
+      - name: GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.BOT_CLIENT_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Ensure gh CLI
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            echo "gh already installed: $(gh --version | head -1)"
+            exit 0
+          fi
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh
+
+      - name: Set parent Story to In progress
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          ISSUE: ${{ github.event.issue.number }}
+          ISSUE_TYPE: ${{ github.event.issue.type.name }}
+          PROJECT_NUMBER: "19"
+          STATUS_FIELD_ID: PVTSSF_lADOBhwPpc4BfysfzhaDCsE
+          STATUS_IN_PROGRESS_OPTION_ID: "47fc9ee4"
+        run: |
+          set -euo pipefail
+
+          if [[ "${ISSUE_TYPE:-}" != "Task" ]]; then
+            echo "Skip: type=${ISSUE_TYPE:-none}"
+            exit 0
+          fi
+
+          meta="$(gh api graphql -f query="
+            query {
+              repository(owner: \"${OWNER}\", name: \"${REPO}\") {
+                issue(number: ${ISSUE}) {
+                  parent {
+                    number
+                    title
+                    state
+                    issueType { name }
+                    repository { nameWithOwner }
+                    projectItems(first: 20) {
+                      nodes {
+                        id
+                        project { id number }
+                        fieldValues(first: 20) {
+                          nodes {
+                            __typename
+                            ... on ProjectV2ItemFieldSingleSelectValue {
+                              name
+                              field { ... on ProjectV2SingleSelectField { name } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ")"
+
+          parent_type="$(echo "$meta" | jq -r '.data.repository.issue.parent.issueType.name // empty')"
+          parent_state="$(echo "$meta" | jq -r '.data.repository.issue.parent.state // empty')"
+          parent_repo="$(echo "$meta" | jq -r '.data.repository.issue.parent.repository.nameWithOwner // empty')"
+          parent_number="$(echo "$meta" | jq -r '.data.repository.issue.parent.number // empty')"
+          parent_title="$(echo "$meta" | jq -r '.data.repository.issue.parent.title // empty')"
+
+          if [[ -z "$parent_number" ]]; then
+            echo "No parent; skip."
+            exit 0
+          fi
+          if [[ "$parent_type" != "Story" ]]; then
+            echo "Parent is not a Story; skip."
+            exit 0
+          fi
+          if [[ "$parent_state" != "OPEN" ]]; then
+            echo "Parent ${parent_repo}#${parent_number} is ${parent_state}; skip."
+            exit 0
+          fi
+
+          item_id="$(echo "$meta" | jq -r --argjson n "$PROJECT_NUMBER" '
+            .data.repository.issue.parent.projectItems.nodes[]
+            | select(.project.number == $n)
+            | .id' | head -1)"
+          project_id="$(echo "$meta" | jq -r --argjson n "$PROJECT_NUMBER" '
+            .data.repository.issue.parent.projectItems.nodes[]
+            | select(.project.number == $n)
+            | .project.id' | head -1)"
+          story_status="$(echo "$meta" | jq -r --argjson n "$PROJECT_NUMBER" '
+            .data.repository.issue.parent.projectItems.nodes[]
+            | select(.project.number == $n)
+            | .fieldValues.nodes[]?
+            | select(.__typename == "ProjectV2ItemFieldSingleSelectValue")
+            | select(.field.name == "Status")
+            | .name' | head -1)"
+
+          if [[ -z "$item_id" || "$item_id" == "null" ]]; then
+            echo "Story not on Project ERP; skip."
+            exit 0
+          fi
+          if [[ "$story_status" != "Backlog" && "$story_status" != "Ready" ]]; then
+            echo "Story already ${story_status:-unset}; skip."
+            exit 0
+          fi
+
+          echo "Setting ${parent_repo}#${parent_number} (${parent_title}) ${story_status} -> In progress"
+          gh project item-edit \
+            --id "$item_id" \
+            --project-id "$project_id" \
+            --field-id "$STATUS_FIELD_ID" \
+            --single-select-option-id "$STATUS_IN_PROGRESS_OPTION_ID"
+
+  from-board:
+    name: Cascade Story children
+    if: ${{ inputs.sync_board }}
+    runs-on: ${{ fromJSON(inputs.runner_json) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: BluefoxSV/.github
+          ref: main
+          path: shared
+      - name: GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.BOT_CLIENT_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+      - name: Ensure gh CLI
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            echo "gh already installed: $(gh --version | head -1)"
+            exit 0
+          fi
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh
+      - name: Cascade Sprint, Ready, and In progress
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PROJECT_OWNER: BluefoxSV
+          PROJECT_NUMBER: "19"
+          STATUS_FIELD_ID: PVTSSF_lADOBhwPpc4BfysfzhaDCsE
+          SPRINT_FIELD_ID: PVTIF_lADOBhwPpc4BfysfzhaVi_Q
+          STATUS_READY_OPTION_ID: "61e4505c"
+          STATUS_IN_PROGRESS_OPTION_ID: "47fc9ee4"
+        run: python3 shared/.github/scripts/sync-erp-story-children.py
