@@ -2,6 +2,7 @@
 
 This public repository provides organization-default Issue Forms and reusable
 ERP project workflows.
+This repo should be public because of github shared workflows restriction.
 
 - `.github/ISSUE_TEMPLATE/` is the source for ERP Issue Forms. Because this
   repository is private, GitHub does not inherit them automatically; copy them
