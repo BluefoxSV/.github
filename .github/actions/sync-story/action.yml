@@ -1,0 +1,7 @@
+name: Sync ERP Story children
+description: Apply Story Status and Sprint to child Tasks in ERP.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: python3 "$GITHUB_ACTION_PATH/sync-erp-story-children.py"

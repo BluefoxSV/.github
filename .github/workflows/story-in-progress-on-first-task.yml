@@ -163,11 +163,6 @@ jobs:
     if: ${{ inputs.sync_board }}
     runs-on: ${{ fromJSON(inputs.runner_json) }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: BluefoxSV/.github
-          ref: main
-          path: shared
       - name: GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -199,4 +194,4 @@ jobs:
           SPRINT_FIELD_ID: PVTIF_lADOBhwPpc4BfysfzhaVi_Q
           STATUS_READY_OPTION_ID: "61e4505c"
           STATUS_IN_PROGRESS_OPTION_ID: "47fc9ee4"
-        run: python3 shared/.github/scripts/sync-erp-story-children.py
+        uses: BluefoxSV/.github/.github/actions/sync-story@main
